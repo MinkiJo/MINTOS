@@ -24,6 +24,8 @@ add ` export PATH="[gcc arm/bin path]:$PATH"`
 
 ### Make
 `make` 
+
+
 `find out.elf`
 
 <br>
