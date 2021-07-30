@@ -30,6 +30,8 @@ add ` export PATH="[gcc arm/bin path]:$PATH"`
 
 ### OPENOCD
 
+`sudo apt-get install openocd`
+
 
 program `make flash`
 
