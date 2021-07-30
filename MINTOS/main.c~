@@ -1,0 +1,312 @@
+#include "STM32FDiscovery.h"
+#include <stdio.h>
+#include <math.h>
+
+#define PI 3.1415
+#define SR 128
+
+unsigned char rec, adc_val;
+int count = 0;
+
+char buf[32];
+int len;
+int tim2tick = 0;
+void sendStr(char buf[], int max);
+
+double sig_Re[SR];
+double sig_Im[SR];
+double fft_buf[SR];
+
+void clk(void)
+{
+	RCC_CR = 0;
+	RCC_PLLCFGR = 0;
+	RCC_CFGR = 0;
+		
+	RCC_CR |= (1<<16); // HSE set
+	while( (RCC_CR & ( 1<<17) ) == 0 ); // wait until HSE ready
+	
+	RCC_PLLCFGR |= 8;//0x00000008; // set PLLM
+	RCC_PLLCFGR |= (336<<6);//|= (336<<6); // 		set PLLN
+	RCC_PLLCFGR |= (0<<16); // set PLLP
+	RCC_PLLCFGR |= (7<<24);//0x07000000; // set PLLQ
+
+	RCC_PLLCFGR |= (1<<22); // set PLL src HSE
+	
+
+	RCC_CR |= (1<<24); // PLL ON
+	while( (RCC_CR & (1<<25)) == 0); // wait until PLL ready
+	
+	FLASH_ACR |= 5;
+	RCC_CFGR |= 2; // set PLL to system clock
+	
+		
+	while( (RCC_CFGR & (12) ) != 8); // wait until PLL ready
+	
+	RCC_CFGR |= (1<<12) | (1<<10); // set APB1 div 4
+	RCC_CFGR |= (1<<15); // set APB2 div2
+
+    SCB_CPACR |= (3<<20) | (3<<22);
+}
+
+void set_usart2(){
+    //USART PA2, PA3 
+    RCC_AHB1ENR |= 1<<0; // PORT CLOCK 
+    GPIOA_MODER |=(1<<5) | (1<<7); // alternate function using
+    GPIOA_AFRL  |=(7<<8) | (7<<12); //AF7 USING 
+   
+    //seg USART2
+    RCC_APB1ENR |=(1<<17); // UART2 CLK ENABLE 
+    USART2_CR1  |=(0<<12); //
+    USART2_CR2  |=(0<<13) | (0<<12);
+
+    USART2_BRR  = (unsigned int)(42000000/115200); //115200 = baud rate
+
+    USART2_CR1  |= (1<<3) | (1<<2); // TX RX ENABLE
+    USART2_CR1  |= (1<<5); // Using flag to catch interrupt
+    USART2_CR1  |= (1<<13); // USART ENABLE
+
+    //USART interrupt enable
+    NVIC_ISER1  |= 1<<6; //
+}
+
+// ADC1, channel 1, PA1
+void set_adc1(){
+    RCC_AHB1ENR |= 0x00000001; // RCC clock enable
+    GPIOA_MODER |= 3<<2;       // PA1 analog mode
+    RCC_APB2ENR |= 1<<8;       // ADC clock enable
+    RCC_CFGR    |= 1<<15 | 1<<13; // Seg APB2 div4 = 42MHz
+
+    ADC1_CR2    |= 1<<0; // ADC1 enable
+    
+    ADC1_SMPR2  |= 3<<0; // channel 1 sammpling cycle 56 cycle
+    ADC1_CR1    |= 2<<24 | 1<<5; // 8 bit resolution , quant - divide 8bit
+                                 // end-of-conversion interrupt enable
+    ADC1_CCR    |= 1<<16;       // PCLK2 div4
+    ADC1_SQR1   |= 0<<20;       // channel 1 : 1 conversion
+    ADC1_SQR3   |= 1<<0;        // 1st conversion : channeel 1
+    
+    NVIC_ISER0  |= 1<<18;       // enable interrupt
+}
+
+
+void set_timer2(){
+    RCC_APB1ENR |= 1<<0;
+    TIM2_CR1 = 0; //initialize
+    TIM2_PSC = 84 -1;
+    TIM2_ARR = 1000 - 1;
+    TIM2_DIER |= 1<<0;
+    TIM2_EGR |= 1<<0;
+    TIM2_CR1 |= 1<<0;
+
+    NVIC_ISER0 |= 1<<28;
+}
+
+
+void TIM2_IRQHandler(){
+   TIM2_SR &= 0x00000000;
+   //tim2tick++;             
+   ADC1_CR2    |= 1<<30; //interrupt reset
+   //tim2tick = 0;   
+}
+
+void USART2_IRQHandler(){
+    if(USART2_SR & (1<<5)){ //Interrupt check
+        rec = USART2_DR;
+        
+        USART2_DR = rec; // echo 1byte 
+        while( !(USART2_SR & (1<<7)) ); // usart2_sr resigter 6,7 bit is 
+        while( !(USART2_SR & (1<<6)) ); // checking process
+       
+        //GPIOD_ODR ^= 1<<12;
+
+        USART2_CR1 |=(1<<5); //interrupt reset
+    }
+}
+
+void EXTI0_IRQHandler()  {
+    GPIOD_ODR ^= 1 << 13;
+    GPIOD_ODR ^= 1 << 14;
+    GPIOD_ODR ^= 1 << 15;
+    
+    EXTI_PR |= 1<<0; //clear pending bit for EXTI0
+}
+
+
+void send_fft(double * data){
+	for(uint16_t i =0; i< ( SR>>1); i++){
+    	uint8_t temp = (uint8_t)data[i];
+		USART2_DR = temp;  
+       	while( !(USART2_SR & (1<<7)) ); 
+	    while( !(USART2_SR & (1<<6)) ); 		
+        
+
+        //len = sprintf(buf, "%d : %d\n",i, (int)data[i]);        
+        //sendStr(buf, len); 
+
+	}
+        USART2_DR = '\n';
+		while( !(USART2_SR & (1<<7)) ); 
+	    while( !(USART2_SR & (1<<6)) ); 	
+
+}
+
+void swap(double *x, double *y)
+{
+    double temp = *x;
+    *x = *y;
+    *y = temp;
+}
+
+
+
+void fft_windowing(double*sig, int sample){
+	double indexMinusOne,ratio,weighingFactor;
+	double sampleMinusOne = (double)(sample) - 1.0;
+
+	for (uint16_t i = 0; i < (sample >> 1); i++) {
+		indexMinusOne = (double)i;
+		ratio = (indexMinusOne / sampleMinusOne);
+		weighingFactor = 1.0;
+
+		weighingFactor = 0.54 - (0.46 * cos(2*PI * ratio));
+		sig[i] *= weighingFactor;
+		sig[sample - (i + 1)] *= weighingFactor;
+	}
+}
+
+
+uint8_t iexp(uint16_t value){
+	uint8_t result = 0;
+	while(((value >> result) & 1) != 1) result++;
+	return result;
+}
+
+void fft(double* sig_Re, double *sig_Im, uint16_t n){
+	/* Reverse bits */
+	uint16_t j = 0;
+	for (uint16_t i = 0; i < (n - 1); i++) {
+		if (i < j) {
+			swap(&sig_Re[i], &sig_Re[j]);
+			swap(&sig_Im[i], &sig_Im[j]);
+		}
+		uint16_t k = (n >> 1);
+		while (k <= j) {
+			j -= k;
+			k >>= 1;
+		}
+		j += k;
+	}
+    //send_fft(sig_Re);
+
+	for (int len = 2; len <= n; len <<= 1) {
+		double x = 2 * 3.14 / len;
+
+
+		for (int i = 0; i < n; i += len) {
+
+			double e_re = 1;
+			double e_im = 0;
+			for (int j = 0; j < len / 2; j++) {
+				int cur = i + j;
+
+				double even_re = sig_Re[cur];
+				double even_im = sig_Im[cur];
+				double odd_re = sig_Re[cur + len / 2] * e_re - sig_Im[cur + len / 2] * e_im;
+				double odd_im = sig_Im[cur + len / 2] * e_re + sig_Re[cur + len / 2] * e_im;
+
+				sig_Re[cur] = even_re + odd_re;
+				sig_Im[cur] = even_im + odd_im;
+				sig_Re[cur + len / 2] = even_re - odd_re;
+				sig_Im[cur + len / 2] = even_im - odd_im;
+                
+                double temp;
+				temp = e_re * cos(x) - e_im * sin(x);
+				e_im = e_im * cos(x) + e_re * sin(x);
+                e_re = temp;
+			}
+		}
+	}
+}
+
+
+uint8_t sig_count = 0;
+
+void ADC1_IRQHandler() {
+    if( ADC1_SR & 1<<1 ) {
+        adc_val = ADC1_DR & 0xFF;
+
+       	
+        if(sig_count == SR){
+            
+      		fft_windowing(sig_Re,SR);
+		    fft(sig_Re, sig_Im,SR);
+	    	for(int i=0;i<SR;i++){
+		    	fft_buf[i] = sqrt(pow(sig_Re[i],2) + pow(sig_Im[i],2));
+	    	}	
+	        send_fft(fft_buf);
+	        sig_count = 0;
+         }else{
+            sig_Im[sig_count] = 0;
+            sig_Re[sig_count++] = (double)adc_val;
+         }
+        //len = sprintf(buf, "%.2f\n", sig_Re[sig_count]);        
+        //sendStr(buf, len);     
+        }
+   //ADC1_CR2    |= 1<<30; //interrupt reset
+}
+
+
+int main (void)
+{
+	
+	clk();
+	
+	RCC_CFGR |= 0x04600000;
+
+    /* PORT A */
+	RCC_AHB1ENR  |= 1<<0; //RCC clock enable register	
+    GPIOA_MODER  |= 0<<0; // input mode
+    GPIOA_OTYPER |= 0<<0; // output push-pull
+    GPIOA_PUPDR  |= 0<<0; // no pull-up, pull-down
+	
+	/*button intr set*/
+    SYSCFG_EXTICR1 |= 0<<0; // EXTI0 connect to PA0
+    EXTI_IMR       |= 1<<0; // Mask EXTI0
+    EXTI_RTSR      |= 1<<0; // rising edge trigger enable
+    EXTI_FTSR      |= 0<<0; // falling edge trigger disable
+    NVIC_ISER0     |= 1<<6; // enable EXTI0 Interrupt
+    
+    
+    /* PORT D */
+	RCC_AHB1ENR  |= 1<<3;		// PORTD enable
+	GPIOD_MODER  |= 1<<24;		// PORTD 12 general output mode
+	GPIOD_MODER  |= 1<<26;		// PORTD 13 general output mode
+	GPIOD_MODER  |= 1<<28;		// PORTD 14 general output mode
+	GPIOD_MODER  |= 1<<30;		// PORTD 15 general output mode
+	GPIOD_OTYPER |= 0x00000000;
+	GPIOD_PUPDR	 |= 0x00000000;
+	
+	GPIOD_ODR |= 1<<12;
+    set_adc1();
+    set_usart2();
+    set_timer2(); 
+
+    ADC1_CR2 |= 1<<30;
+
+ 
+	while(1) {
+        
+        
+	}
+}
+
+void sendStr(char buf[], int max){
+    int cnt = 0;
+
+    while(cnt < max){
+        USART2_DR = buf[cnt++]; // echo 1byte 
+        while( !(USART2_SR & (1<<7)) ); 
+        while( !(USART2_SR & (1<<6)) ); 
+    }
+}
