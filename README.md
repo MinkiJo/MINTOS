@@ -1,6 +1,6 @@
 # MINTOS
 
-This is small, lightweight Real time OS for study
+This is small, lightweight Embedded OS for study
 
 
 **Target Board** : STM32f4Discovery
